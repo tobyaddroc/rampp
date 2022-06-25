@@ -1,0 +1,250 @@
+#pragma once
+
+#pragma region Include
+#include <Windows.h>
+#include <comdef.h>
+#include <TlHelp32.h>
+#include <iostream>
+#include <string>
+#include <Psapi.h>
+#include <vector>
+#include <map>
+#include <chrono>
+#pragma endregion
+#pragma region Macros
+#define simple		void
+#define protection	inline
+#define ram			DWORD
+#define chart		(const wchar_t*)
+#define import		template
+#define __helpp		WINAPI
+#define __rampp		__cdecl
+#define INRANGE(x,a,b)  (x >= a && x <= b) 
+#define getBits( x )    (INRANGE((x&(~0x20)),'A','F') ? ((x&(~0x20)) - 'A' + 0xa) : (INRANGE(x,'0','9') ? x - '0' : 0))
+#define getByte( x )    (getBits(x[0]) << 4 | getBits(x[1]))
+#define SCAN_NORMAL 0x0
+#define SCAN_AND_READ 0x1
+#define SCAN_AND_SUBTRACT 0x2
+#define SCAN_OFFSET SCAN_AND_READ | SCAN_AND_SUBTRACT
+typedef bool lean;
+#pragma endregion
+#pragma region DllImport
+typedef LONG(NTAPI* NtSuspendProcess)(IN HANDLE ProcessHandle);
+typedef LONG(NTAPI* NtResumeProcess)(IN HANDLE ProcessHandle);
+#pragma endregion
+
+
+class RAMpp
+{
+public:
+	#pragma region Attach
+	protection ram __rampp PidByWindowName(HWND _hwnd, const char* _szWindowName);
+	ram _Pid;
+	HANDLE handle;
+			protection lean __rampp Attach(const char* pName, const char* windowName)
+			{
+				PidByWindowName(NULL, windowName);
+				handle = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, NULL);
+				PROCESSENTRY32 entry;
+				entry.dwSize = sizeof(entry);
+				do
+					if (!strcmp(_bstr_t(entry.szExeFile), pName))
+					{
+						CloseHandle(handle);
+						_process = OpenProcess(PROCESS_ALL_ACCESS, false, _pId);
+						return true;
+					}
+				while (Process32Next(handle, &entry));
+
+				return false;
+			}
+		#pragma endregion
+	#pragma region Detach
+			protection simple __rampp Detach()
+			{
+				CloseHandle(handle);
+				CloseHandle(_process);
+			}
+#pragma endregion
+	#pragma region GetModule
+			ram __rampp GetModuleBaseAddress(const wchar_t* modName)
+			{
+				uintptr_t modBaseAddr = 0;
+				HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, _pId);
+				if (hSnap != INVALID_HANDLE_VALUE)
+				{
+					MODULEENTRY32 modEntry;
+					modEntry.dwSize = sizeof(modEntry);
+					if (Module32First(hSnap, &modEntry))
+					{
+						do
+						{
+							if (!_wcsicmp(modEntry.szModule, modName))
+							{
+								modBaseAddr = (uintptr_t)modEntry.modBaseAddr;
+								break;
+							}
+						} while (Module32Next(hSnap, &modEntry));
+					}
+				}
+				CloseHandle(hSnap);
+				return modBaseAddr;
+			}
+#pragma endregion
+	#pragma region Protection
+			simple __rampp Protect()
+			{
+				HANDLE hProcess = OpenProcess(PROCESS_SUSPEND_RESUME, FALSE, _pId);
+				if (!hProcess) {
+					printf("RAMpp error while process protect: 0x%08X\n", GetLastError());
+					return;
+				}
+				NtSuspendProcess _NtSuspendProcess = (NtSuspendProcess)GetProcAddress(GetModuleHandle(L"ntdll"), "NtSuspendProcess");
+				_NtSuspendProcess(hProcess);
+				CloseHandle(hProcess);
+			}
+
+			simple __rampp Vulback()
+			{
+				HANDLE hProcess = OpenProcess(PROCESS_SUSPEND_RESUME, FALSE, _pId);
+				if (!hProcess) {
+					printf("RAMpp error while process vulback: 0x%08X\n", GetLastError());
+					return;
+				}
+				NtResumeProcess _NtResumeProcess = (NtResumeProcess)GetProcAddress(GetModuleHandle(L"ntdll.dll"), "NtResumeProcess");
+				_NtResumeProcess(hProcess);
+				CloseHandle(hProcess);
+				return;
+			}
+#pragma endregion
+	#pragma region RAM
+			import <class T>
+				T __rampp Read(const DWORD dwAddress)
+			{
+				T _read;
+				ReadProcessMemory(_process, LPVOID(dwAddress), &_read, sizeof(T), NULL);
+				return _read;
+			}
+
+			import <class T>
+				protection simple __helpp Write(const ram dwAdress, const T value)
+			{
+				WriteProcessMemory(_process, LPVOID(dwAdress), &value, sizeof(T), NULL);
+			}
+#pragma endregion
+	#pragma region PatternScanner
+			class CMemoryModule
+			{
+			public:
+				explicit CMemoryModule(DWORD base, DWORD size, const std::string& name, const std::string& path)
+					:m_dwImageBase(base), m_dwImageSize(size), m_szImageName(name), m_szImagePath(path)
+				{
+
+				}
+
+				DWORD GetImageBase() const
+				{
+					return m_dwImageBase;
+				}
+				DWORD GetImageSize() const
+				{
+					return m_dwImageSize;
+				}
+				const std::string& GetImageName() const
+				{
+					return m_szImageName;
+				}
+				const std::string& GetImagePath() const
+				{
+					return m_szImagePath;
+				}
+
+			private:
+				DWORD m_dwImageBase;
+				DWORD m_dwImageSize;
+				std::string m_szImageName;
+				std::string m_szImagePath;
+			};
+
+			bool CompareBytes(const unsigned char* bytes, const char* pattern)
+			{
+				for (; *pattern; *pattern != ' ' ? ++bytes : bytes, ++pattern) {
+					if (*pattern == ' ' || *pattern == '?')
+						continue;
+					if (*bytes != getByte(pattern))
+						return false;
+					++pattern;
+				}
+				return true;
+			}
+
+			uintptr_t FindPattern(CMemoryModule* pModule, const char* pattern, short type, uintptr_t patternOffset, uintptr_t addressOffset, bool subtract = true)
+			{
+				size_t imgSize = pModule->GetImageSize();
+				uintptr_t startAddress = pModule->GetImageBase();
+
+				BYTE* pBytes = new BYTE[imgSize];
+
+				if (!ReadProcessMemory(handle, (LPVOID)startAddress, pBytes, imgSize, nullptr))
+				{
+					std::cout << "Failed to dump module bytes from module: " << pModule->GetImageName() << std::endl;
+					return 0x0;
+				}
+
+				auto max = imgSize - 0x1000;
+				for (auto off = 0UL; off < max; ++off)
+				{
+					if (CompareBytes(pBytes + off, pattern))
+					{
+						auto add = startAddress + off + patternOffset;
+						if (type & SCAN_AND_READ)
+							ReadProcessMemory(handle, (LPVOID)add, &add, sizeof(uintptr_t), nullptr);
+
+						if (type & SCAN_AND_SUBTRACT)
+							add -= startAddress;
+
+						delete[] pBytes;
+						return add + addressOffset;
+					}
+				}
+				delete[] pBytes;
+				return 0x0;
+			}
+
+#pragma endregion
+	#pragma region Utils
+	protection ram __rampp PidByWindowName(HWND _hwnd, const char* _szWindowName)
+	{
+		if (_hwnd == NULL)
+		{
+			_hwnd = FindWindow(NULL, (const wchar_t*)_szWindowName);
+			GetWindowThreadProcessId(_hwnd, &_pId);
+			return _pId;
+		}
+		else
+		{
+			GetWindowThreadProcessId(_hwnd, &_pId);
+			return _pId;
+		}
+	}
+	protection ram __rampp GetPid()
+	{
+		return _pId;
+	}
+	protection HANDLE __rampp GetHandle()
+	{
+		return handle;
+	}
+#pragma endregion
+private:
+	#pragma region Temps
+	DWORD _pId;
+	HANDLE _process;
+	DWORD pBaseAddress;
+	DWORD pSize;
+	HANDLE processHandle;
+};
+RAMpp(awoqwppsalascenaspcklawssdcpoadlvcvnrpsadmaswekoakcmaawoqwppsalascenaspcklawssdcpoadlvcvnrpsadmaswekoakcmaawoqwppsalascenaspcklawssdcpoadlvcvnrpsadmaswekoakcmaawoqwppsalascenaspcklawssdcpoadlvcvnrpsadmaswekoakcmaawoqwppsalascenaspcklawssdcpoadlvcvnrpsadmaswekoakcmaawoqwppsalascenaspcklawssdcpoadlvcvnrpsadmaswekoakcmaawoqwppsalascenaspcklawssdcpoadlvcvnrpsadmaswekoakcmaawoqwppsalascenaspcklawssdcpoadlvcvnrpsadmaswekoakcmaawoqwppsalascenaspcklawssdcpoadlvcvnrpsadmaswekoakcmaawoqwppsalascenaspcklawssdcpoadlvcvnrpsadmaswekoakcmaawoqwppsalascenaspcklawssdcpoadlvcvnrpsadmaswekoakcmaawoqwppsalascenaspcklawssdcpoadlvcvnrpsadmaswekoakcmaawoqwppsalascenaspcklawssdcpoadlvcvnrpsadmaswekoakcmaawoqwppsalascenaspcklawssdcpoadlvcvnrpsadmaswekoakcmaawoqwppsalascenaspcklawssdcpoadlvcvnrpsadmaswekoakcmaawoqwppsalascenaspcklawssdcpoadlvcvnrpsadmaswekoakcmaawoqwppsalascenaspcklawssdcpoadlvcvnrpsadmaswekoakcma);
+#pragma endregion
+
+#define rampp	(awoqwppsalascenaspcklawssdcpoadlvcvnrpsadmaswekoakcmaawoqwppsalascenaspcklawssdcpoadlvcvnrpsadmaswekoakcmaawoqwppsalascenaspcklawssdcpoadlvcvnrpsadmaswekoakcmaawoqwppsalascenaspcklawssdcpoadlvcvnrpsadmaswekoakcmaawoqwppsalascenaspcklawssdcpoadlvcvnrpsadmaswekoakcmaawoqwppsalascenaspcklawssdcpoadlvcvnrpsadmaswekoakcmaawoqwppsalascenaspcklawssdcpoadlvcvnrpsadmaswekoakcmaawoqwppsalascenaspcklawssdcpoadlvcvnrpsadmaswekoakcmaawoqwppsalascenaspcklawssdcpoadlvcvnrpsadmaswekoakcmaawoqwppsalascenaspcklawssdcpoadlvcvnrpsadmaswekoakcmaawoqwppsalascenaspcklawssdcpoadlvcvnrpsadmaswekoakcmaawoqwppsalascenaspcklawssdcpoadlvcvnrpsadmaswekoakcmaawoqwppsalascenaspcklawssdcpoadlvcvnrpsadmaswekoakcmaawoqwppsalascenaspcklawssdcpoadlvcvnrpsadmaswekoakcmaawoqwppsalascenaspcklawssdcpoadlvcvnrpsadmaswekoakcmaawoqwppsalascenaspcklawssdcpoadlvcvnrpsadmaswekoakcmaawoqwppsalascenaspcklawssdcpoadlvcvnrpsadmaswekoakcma) // extern
